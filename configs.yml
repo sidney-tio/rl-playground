@@ -1,0 +1,34 @@
+env: CartPole-v0
+num_episodes: 1000
+timesteps: 200
+use_GPU: False
+seed: 42
+learning_iterations_per_round: 5
+gradient_clipping_norm: 7.0
+clip_epsilon: 0.1
+discount_rate: 0.99
+episodes_per_learning_round: 4
+normalise_rewards: True
+
+
+policy: {
+    type: mlp,
+    learning_rate: 0.01
+    }
+
+mlp: {
+    params: {
+      num_layers: 2,
+      layer_size: [20,20],
+    }
+}
+
+conv: {
+    params: {
+        NUM_HIDDEN_LAYERS : 3,
+        SIZE_HIDDEN_LAYERS : 64,
+        NUM_FILTERS : 25,
+        NUM_CONV_LAYERS : 3
+        # OBS_STATE_SHAPE:
+        }
+      }

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -62,14 +63,27 @@ class MLPNetwork(nn.Module):
             [nn.Linear(layer_size[i], layer_size[i+1]) for i in range(0, num_layers - 1)])
 
         if layer_size:
-            self.output_layer = nn.Linear(layer_size[-1], output_size)
+            self.output_actor = nn.Linear(layer_size[-1], output_size)
+            self.output_critic = nn.Linear(layer_size[-1], 1)
         else:
-            self.output_layer = nn.Linear(initial_layer_size, output_size)
+            self.output_actor = nn.Linear(initial_layer_size, output_size)
+            self.output_critic = nn.Linear(initial_layer_size, 1)
 
-    def forward(self, x):
-        x = self.input_layer(x)
-
+    def forward(self, state):
+        x = self.input_layer(state)
         for layers in self.linear_layers:
             x = F.relu(layers(x))
-        x = F.softmax(self.output_layer(x))
-        return x
+
+        prob = F.softmax(self.output_actor(x), dim=1)
+        value = self.output_critic(x)
+        return prob, value
+
+    def act(self, state, action=None):
+        prob, value = self.forward(state)
+        dist = torch.distributions.Categorical(prob.squeeze())
+        if action is None:
+            action = dist.sample()
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy()
+
+        return action, log_prob, entropy, value

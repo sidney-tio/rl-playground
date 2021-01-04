@@ -1,15 +1,17 @@
 env: CartPole-v0
-num_episodes: 1000
+num_episodes: 10
 timesteps: 200
 use_GPU: False
 seed: 42
-learning_iterations_per_round: 5
-gradient_clipping_norm: 7.0
-clip_epsilon: 0.1
+learning_iterations_per_round: 2
+gradient_clipping_norm: 5
+clip_epsilon: 0.2
 discount_rate: 0.99
-episodes_per_learning_round: 4
+episodes_per_learning_round: 1
 normalise_rewards: True
-
+use_gae: True
+gae_lambda: 0.95
+entropy_coef: 0.01
 
 policy: {
     type: mlp,
@@ -19,7 +21,7 @@ policy: {
 mlp: {
     params: {
       num_layers: 2,
-      layer_size: [20,20],
+      layer_size: [64,64],
     }
 }
 

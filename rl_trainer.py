@@ -25,151 +25,110 @@ class PPOTrainer():
         self.all_states = []
         self.all_actions = []
         self.all_rewards = []
+        self.all_values = []
+        self.all_log_prob = []
         self.states_batched = []
         self.actions_batched = []
         self.rewards_batched = []
+        self.values_batched = []
+        self.log_prob_batched = []
         self.average_score_required_to_win = 195.0
         self.init_NN()
         self.reset_game()
 
-    def init_batch_lists(self):
-        if self.states_batched:
-            self.all_states.extend(self.states_batched)
-            self.all_actions.extend(self.actions_batched)
-            self.all_rewards.extend(self.rewards_batched)
-        self.states_batched = []
-        self.actions_batched = []
-        self.rewards_batched = []
-
-    def create_NN(self, NN_type, NN_params):
-        NN_dict = {'conv': ConvMLPNetwork,
-                   'mlp': MLPNetwork}
-
-        return NN_dict[NN_type](NN_params, self.obs_space, self.action_space)
-
-    def init_NN(self):
-        policy_type = self.config['policy']['type']
-        params = self.config[policy_type]['params']
-
-        self.policy_new = self.create_NN(policy_type,
-                                         params)
-
-        self.policy_old = self.create_NN(policy_type,
-                                         params)
-
-        self.policy_old.load_state_dict(copy.deepcopy(self.policy_new.state_dict()))
-        self.policy_new_optim = torch.optim.Adam(self.policy_new.parameters(),
-                                                 lr=self.config['policy']['learning_rate'], eps=1e-4)
-        print(self.policy_new)
-
     def step(self, observation):
         self.timesteps += 1
         state = torch.from_numpy(observation).float()
-        actor_output = self.policy_new.forward(state)
-        # hardcoded for our own usecase
-        action_distribution = create_actor_distribution("DISCRETE", actor_output, self.action_space)
-        action = action_distribution.sample().cpu().item()
-        self.record_timestep(observation, action)
-        return action
+        action, action_log_prob, _, value = self.policy.act(state)
+        self.record_timestep(observation, action, value, action_log_prob)
+        return action.item()
 
-    def record_timestep(self, observation, action):
+    def policy_learn(self):
+        for _ in range(self.config['learning_iterations_per_round']):
+            advantage, returns_batched = self.calc_advantage()
+
+            states = torch.Tensor(self.states_batched).float()
+            actions = torch.Tensor(self.actions_batched).float()
+
+            _, action_log_probs, entropy, value = self.policy.act(
+                states, actions)
+            ratio = torch.exp(action_log_probs - torch.Tensor(self.log_prob_batched))
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(
+                ratio, 1.0 - self.config['clip_epsilon'], 1.0 + self.config['clip_epsilon']) * advantage
+
+            action_loss = -torch.min(surr1, surr2).mean()
+            value_loss = (returns_batched - value).pow(2).mean()
+            entropy = entropy.mean()
+
+            self.take_optim_step(value_loss, action_loss, entropy)
+
+    def calc_returns(self):
+        returns_batched = []
+        for episode_rewards in self.rewards_batched:
+            returns = []
+            cumulative = 0
+            for reward in episode_rewards[::-1]:
+                cumulative = reward + self.config['discount_rate'] * cumulative
+                returns.append(cumulative)
+            returns.reverse()
+            returns_batched.append(returns)
+        return returns_batched
+
+    def calc_gae(self):
+        returns_batched = []
+        for episode, episode_rewards in enumerate(self.rewards_batched):
+            returns = []
+            gae = 0
+            values = self.values_batched[episode] + [0]
+            for step in reversed(range(len(episode_rewards))):
+                delta = episode_rewards[step] + \
+                    self.config['discount_rate'] * values[step + 1] - values[step]
+                gae = delta + self.config['discount_rate'] * self.config['gae_lambda'] * gae
+                returns.insert(0, gae + values[step])
+            returns_batched.append(returns)
+        return returns_batched
+
+    def calc_advantage(self):
+        returns_batched = []
+        if self.config['use_gae']:
+            returns_batched = self.calc_gae()
+        else:
+            returns_batched = self.calc_returns()
+        advantage = torch.Tensor(returns_batched) - torch.Tensor(self.values_batched)
+        advantage = (advantage - advantage.mean(dim=1, keepdim=True)) / \
+            (advantage.std(dim=1, keepdim=True) + 1e-5)
+        return advantage, torch.Tensor(returns_batched)
+
+    def take_optim_step(self, value_loss, action_loss, dist_entropy):
+        self.policy_optim.zero_grad()
+        loss = value_loss + action_loss - (dist_entropy * self.config['entropy_coef'])
+        print(loss)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
+                                       self.config['gradient_clipping_norm'])
+        self.policy_optim.step()
+
+    def record_timestep(self, observation, action, value, action_log_prob):
         self.current_episode_state.append(observation)
         self.current_episode_action.append(action)
+        self.current_episode_value.append(value)
+        self.current_episode_log_prob.append(action_log_prob)
 
     def receive_rewards(self, reward):
         self.current_episode_reward.append(reward)
-
-    def policy_learn(self):
-        all_discounted_returns = self.calculate_all_discounted_returns()
-        if self.config['normalise_rewards']:
-            all_discounted_returns = normalise_rewards(all_discounted_returns)
-
-        for _ in range(self.config["learning_iterations_per_round"]):
-            all_ratio_of_policy_probabilities = self.calculate_all_ratio_of_policy_probabilities()
-            loss = self.calculate_loss([all_ratio_of_policy_probabilities], all_discounted_returns)
-            self.take_policy_new_optimisation_step(loss)
-        self.init_batch_lists()
-
-    def take_policy_new_optimisation_step(self, loss):
-        """Takes an optimisation step for the new policy"""
-        self.policy_new_optim.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_new.parameters(),
-                                       self.config["gradient_clipping_norm"])
-        self.policy_new_optim.step()
-
-    def calculate_all_ratio_of_policy_probabilities(self):
-        """For each action calculates the ratio of the probability that the new policy would have picked the action vs.
-         the probability the old policy would have picked it. This will then be used to inform the loss"""
-        all_states = [state for states in self.states_batched for state in states]
-        all_actions = [[action] for actions in self.actions_batched for action in actions]
-        all_states = torch.stack([torch.Tensor(states).float().to(self.device)
-                                  for states in all_states])
-
-        all_actions = torch.stack([torch.Tensor(actions).float().to(self.device)
-                                   for actions in all_actions])
-        all_actions = all_actions.view(-1, len(all_states))
-
-        new_policy_distribution_log_prob = self.calculate_log_probability_of_actions(
-            self.policy_new, all_states, all_actions)
-        old_policy_distribution_log_prob = self.calculate_log_probability_of_actions(
-            self.policy_old, all_states, all_actions)
-        ratio_of_policy_probabilities = torch.exp(
-            new_policy_distribution_log_prob) / (torch.exp(old_policy_distribution_log_prob) + 1e-8)
-        return ratio_of_policy_probabilities
-
-    def calculate_log_probability_of_actions(self, policy, states, actions):
-        """Calculates the log probability of an action occuring given a policy and starting state"""
-        policy_output = policy.forward(states).to(self.device)
-        policy_distribution = create_actor_distribution(
-            "DISCRETE", policy_output, self.action_space)
-        policy_distribution_log_prob = policy_distribution.log_prob(actions)
-        return policy_distribution_log_prob
-
-    def calculate_loss(self, all_ratio_of_policy_probabilities, all_discounted_returns):
-        """Calculate PPO loss"""
-        all_ratio_of_policy_probabilities = torch.squeeze(
-            torch.stack(all_ratio_of_policy_probabilities))
-        all_ratio_of_policy_probabilities = torch.clamp(input=all_ratio_of_policy_probabilities,
-                                                        min=-sys.maxsize,
-                                                        max=sys.maxsize)
-        all_discounted_returns = torch.tensor(
-            all_discounted_returns).to(all_ratio_of_policy_probabilities)
-        potential_loss_value_1 = all_discounted_returns * all_ratio_of_policy_probabilities
-        potential_loss_value_2 = all_discounted_returns * \
-            self.clamp_probability_ratio(all_ratio_of_policy_probabilities)
-        loss = torch.min(potential_loss_value_1, potential_loss_value_2)
-        loss = -torch.mean(loss)
-        self.logger.info(f'Loss: {loss}')
-        return loss
-
-    def clamp_probability_ratio(self, value):
-        """Clamps a value between a certain range determined by hyperparameter clip epsilon"""
-        return torch.clamp(input=value, min=1.0 - self.config["clip_epsilon"],
-                           max=1.0 + self.config["clip_epsilon"])
-
-    def calculate_all_discounted_returns(self):
-        """Calculates the cumulative discounted return for each episode which we will then use in a learning iteration"""
-        all_discounted_returns = []
-        for episode in range(len(self.states_batched)):
-            discounted_returns = [0]
-            for ix in range(len(self.states_batched[episode])):
-                return_value = self.rewards_batched[episode][-(ix + 1)] + \
-                    self.config['discount_rate']*(discounted_returns[-1])
-                discounted_returns.append(return_value)
-            discounted_returns = discounted_returns[1:]
-            all_discounted_returns.extend(discounted_returns[::-1])
-        return all_discounted_returns
 
     def end_episode(self):
         self.states_batched.append(self.current_episode_state)
         self.actions_batched.append(self.current_episode_action)
         self.rewards_batched.append(self.current_episode_reward)
+        self.values_batched.append(self.current_episode_value)
+        self.log_prob_batched.append(self.current_episode_log_prob)
 
         if (self.episode_number % self.config['episodes_per_learning_round'] == 0):
             self.policy_learn()
-            self.update_learning_rate(self.config['policy']['learning_rate'], self.policy_new_optim)
-            self.equalise_policies()
+            # self.update_learning_rate(self.config['policy']['learning_rate'], self.policy_optim)
+            self.init_batch_lists()
         self.reset_game()
         self.episode_number += 1
         self.timesteps = 0
@@ -178,11 +137,8 @@ class PPOTrainer():
         self.current_episode_state = []
         self.current_episode_action = []
         self.current_episode_reward = []
-
-    def equalise_policies(self):
-        """Sets the old policy's parameters equal to the new policy's parameters"""
-        for old_param, new_param in zip(self.policy_old.parameters(), self.policy_new.parameters()):
-            old_param.data.copy_(new_param.data)
+        self.current_episode_value = []
+        self.current_episode_log_prob = []
 
     def set_random_seeds(self, random_seed=None):
         """Sets all possible random seeds so results can be reproduced"""
@@ -199,21 +155,31 @@ class PPOTrainer():
             torch.cuda.manual_seed_all(random_seed)
             torch.cuda.manual_seed(random_seed)
 
-    def update_learning_rate(self, starting_lr,  optimizer):
-        """Lowers the learning rate according to how close we are to the solution"""
-        if len(self.rewards_batched) > 0:
-            last_rolling_score = self.rewards_batched[-1][-1]
-            if last_rolling_score > 0.75 * self.average_score_required_to_win:
-                new_lr = starting_lr / 100.0
-            elif last_rolling_score > 0.6 * self.average_score_required_to_win:
-                new_lr = starting_lr / 20.0
-            elif last_rolling_score > 0.5 * self.average_score_required_to_win:
-                new_lr = starting_lr / 10.0
-            elif last_rolling_score > 0.25 * self.average_score_required_to_win:
-                new_lr = starting_lr / 2.0
-            else:
-                new_lr = starting_lr
-            for g in optimizer.param_groups:
-                g['lr'] = new_lr
-            if random.random() < 0.001:
-                self.logger.info("Learning rate {}".format(new_lr))
+    def init_batch_lists(self):
+        if self.states_batched:
+            self.all_states.extend(self.states_batched)
+            self.all_actions.extend(self.actions_batched)
+            self.all_rewards.extend(self.rewards_batched)
+            self.all_values.extend(self.values_batched)
+            self.all_log_prob.extend(self.log_prob_batched)
+
+        self.states_batched = []
+        self.actions_batched = []
+        self.rewards_batched = []
+        self.values_batched = []
+        self.log_prob_batched = []
+
+    def create_NN(self, NN_type, NN_params):
+        NN_dict = {'conv': ConvMLPNetwork,
+                   'mlp': MLPNetwork}
+
+        return NN_dict[NN_type](NN_params, self.obs_space, self.action_space)
+
+    def init_NN(self):
+        policy_type = self.config['policy']['type']
+        params = self.config[policy_type]['params']
+
+        self.policy = self.create_NN(policy_type,
+                                     params)
+        self.policy_optim = torch.optim.Adam(self.policy.parameters(),
+                                             lr=self.config['policy']['learning_rate'], eps=1e-4)

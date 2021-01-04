@@ -43,9 +43,9 @@ def main():
             agent.receive_rewards(reward)
             total_reward.append(reward)
             if done:
-                print(f"Episode finished after {t+1} timesteps")
-                agent.end_episode()
+                print(f"Episode {episode} done in {t}")
                 check_solved(total_reward, avg_reward)
+                agent.end_episode()
                 break
 
     env.close()

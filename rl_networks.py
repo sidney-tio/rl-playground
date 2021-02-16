@@ -70,11 +70,11 @@ class MLPNetwork(nn.Module):
             self.output_critic = nn.Linear(initial_layer_size, 1)
 
     def forward(self, state):
-        x = self.input_layer(state)
+        x = F.relu(self.input_layer(state))
         for layers in self.linear_layers:
             x = F.relu(layers(x))
 
-        prob = F.softmax(self.output_actor(x), dim=1)
+        prob = F.softmax(self.output_actor(x), dim=-1)
         value = self.output_critic(x)
         return prob, value
 

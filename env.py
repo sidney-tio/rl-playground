@@ -1,7 +1,7 @@
 import gym
 import yaml
 import numpy as np
-from rl_trainer import PPOTrainer
+from rl_trainer import PPOTrainer, ActorCriticAgent
 
 
 def load_configs():
@@ -30,15 +30,17 @@ def check_solved(total_reward, avg_reward):
 def main():
     configs = load_configs()
     env, n_observation_space, n_action_space = init_env(configs['env'])
-    agent = PPOTrainer(configs, n_observation_space, n_action_space)
+    if configs['policy']['algo'] == 'ppo':
+        agent = PPOTrainer(configs, n_observation_space, n_action_space)
+    elif configs['policy']['algo'] == 'base':
+        agent = ActorCriticAgent(configs, n_observation_space, n_action_space)
 
     avg_reward = []
     for episode in range(configs['num_episodes']):
-        print(f"Starting episode {episode}")
         observation = env.reset()
         total_reward = []
         for t in range(configs['timesteps']):
-            action = agent.step(np.array([observation]))
+            action = agent.step(observation)
             observation, reward, done, info = env.step(action)
             agent.receive_rewards(reward)
             total_reward.append(reward)

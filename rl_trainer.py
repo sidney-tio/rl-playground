@@ -5,36 +5,14 @@ import copy
 import sys
 import numpy as np
 
-from rl_networks import MLPNetwork, ConvMLPNetwork
-from utilities.Utility_Functions import normalise_rewards, create_actor_distribution
-from utilities.rl_utils import setup_logger
+from ac_base import BaseActorCritic
 
 
-class PPOTrainer():
+class PPOTrainer(BaseActorCritic):
     """PPO Algorithm to play with OpenAI Gym environments"""
 
     def __init__(self, config, obs_space, action_space):
-        self.config = config
-        self.logger = setup_logger(os.getcwd())
-        self.obs_space = obs_space
-        self.action_space = action_space
-        self.set_random_seeds(self.config['seed'])
-        self.device = "cuda:0" if self.config['use_GPU'] and torch.cuda.is_available() else "cpu"
-        self.episode_number = 1
-        self.timesteps = 0
-        self.all_states = []
-        self.all_actions = []
-        self.all_rewards = []
-        self.all_values = []
-        self.all_log_prob = []
-        self.states_batched = []
-        self.actions_batched = []
-        self.rewards_batched = []
-        self.values_batched = []
-        self.log_prob_batched = []
-        self.average_score_required_to_win = 195.0
-        self.init_NN()
-        self.reset_game()
+        super().__init__(config, obs_space, action_space)
 
     def step(self, observation):
         self.timesteps += 1
@@ -102,84 +80,64 @@ class PPOTrainer():
 
     def take_optim_step(self, value_loss, action_loss, dist_entropy):
         self.policy_optim.zero_grad()
-        loss = value_loss + action_loss - (dist_entropy * self.config['entropy_coef'])
+        loss = (self.config['value_coef'] * value_loss) + action_loss - \
+            (dist_entropy * self.config['entropy_coef'])
         print(loss)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
                                        self.config['gradient_clipping_norm'])
         self.policy_optim.step()
 
-    def record_timestep(self, observation, action, value, action_log_prob):
-        self.current_episode_state.append(observation)
-        self.current_episode_action.append(action)
-        self.current_episode_value.append(value)
-        self.current_episode_log_prob.append(action_log_prob)
 
-    def receive_rewards(self, reward):
-        self.current_episode_reward.append(reward)
+class ActorCriticAgent(BaseActorCritic):
+    """ Class for vanilla actor-critic """
 
-    def end_episode(self):
-        self.states_batched.append(self.current_episode_state)
-        self.actions_batched.append(self.current_episode_action)
-        self.rewards_batched.append(self.current_episode_reward)
-        self.values_batched.append(self.current_episode_value)
-        self.log_prob_batched.append(self.current_episode_log_prob)
+    def __init__(self, config, obs_space, action_space):
+        super().__init__(config, obs_space, action_space)
 
-        if (self.episode_number % self.config['episodes_per_learning_round'] == 0):
-            self.policy_learn()
-            # self.update_learning_rate(self.config['policy']['learning_rate'], self.policy_optim)
-            self.init_batch_lists()
-        self.reset_game()
-        self.episode_number += 1
-        self.timesteps = 0
+    def step(self, observation):
+        self.timesteps += 1
+        state = torch.from_numpy(observation).float()
+        action, _, _, value = self.policy.act(state)
+        self.record_timestep(observation, action, value, None)
+        return action.item()
 
-    def reset_game(self):
-        self.current_episode_state = []
-        self.current_episode_action = []
-        self.current_episode_reward = []
-        self.current_episode_value = []
-        self.current_episode_log_prob = []
+    def policy_learn(self):
+        discounted_rewards = self.calc_discounted_rewards()
+        loss = self.calc_loss(discounted_rewards)
+        self.take_optim_step(loss)
 
-    def set_random_seeds(self, random_seed=None):
-        """Sets all possible random seeds so results can be reproduced"""
-        if not random_seed:
-            random_seed = np.random.randint(100)
-            self.logger.info("Random seed @ {}".format(random_seed))
-        os.environ['PYTHONHASHSEED'] = str(random_seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.manual_seed(random_seed)
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(random_seed)
-            torch.cuda.manual_seed(random_seed)
+    def calc_discounted_rewards(self):
+        discounted_rewards = []
+        for rewards_episode in self.rewards_batched:
+            rewards = []
+            cumulative = 0
+            for reward in rewards_episode[::-1]:
+                cumulative = reward + self.config['discount_rate'] * cumulative
+                rewards.insert(0, cumulative)
+            discounted_rewards.append(rewards)
+        return discounted_rewards
 
-    def init_batch_lists(self):
-        if self.states_batched:
-            self.all_states.extend(self.states_batched)
-            self.all_actions.extend(self.actions_batched)
-            self.all_rewards.extend(self.rewards_batched)
-            self.all_values.extend(self.values_batched)
-            self.all_log_prob.extend(self.log_prob_batched)
+    def calc_loss(self, discounted_rewards):
+        states = self.flatten_array(self.states_batched)
+        states = torch.from_numpy(states).float()
+        actions = self.flatten_array(self.actions_batched)
+        actions = torch.from_numpy(actions).float()
 
-        self.states_batched = []
-        self.actions_batched = []
-        self.rewards_batched = []
-        self.values_batched = []
-        self.log_prob_batched = []
+        _, log_prob, entropy, value = self.policy.act(states, actions)
 
-    def create_NN(self, NN_type, NN_params):
-        NN_dict = {'conv': ConvMLPNetwork,
-                   'mlp': MLPNetwork}
+        rewards = self.flatten_array(discounted_rewards)
+        advantage = torch.Tensor(rewards) - value
 
-        return NN_dict[NN_type](NN_params, self.obs_space, self.action_space)
+        value_loss = advantage.pow(2).mean()
+        policy_loss = -(log_prob * advantage.detach()).mean()
 
-    def init_NN(self):
-        policy_type = self.config['policy']['type']
-        params = self.config[policy_type]['params']
+        loss = self.config['value_coef'] * value_loss + \
+            policy_loss - self.config['entropy_coef'] * entropy.mean()
+        print("Loss: ", loss.item())
+        return loss
 
-        self.policy = self.create_NN(policy_type,
-                                     params)
-        self.policy_optim = torch.optim.Adam(self.policy.parameters(),
-                                             lr=self.config['policy']['learning_rate'], eps=1e-4)
+    def take_optim_step(self, loss):
+        self.policy_optim.zero_grad()
+        loss.backward()
+        self.policy_optim.step()

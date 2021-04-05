@@ -9,13 +9,13 @@ clip_epsilon: 0.2
 discount_rate: 0.95
 episodes_per_learning_round: 1
 normalise_rewards: True
-use_gae: True
+use_gae: False
 gae_lambda: 0.95
 entropy_coef: 0.01
 value_coef: 0.5
 
 policy: {
-    algo: base,
+    algo: ppo,
     type: mlp,
     learning_rate: 0.001
     }

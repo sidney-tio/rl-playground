@@ -22,11 +22,12 @@ class PPOTrainer(BaseActorCritic):
         return action.item()
 
     def policy_learn(self):
-        for _ in range(self.config['learning_iterations_per_round']):
-            advantage, returns_batched = self.calc_advantage()
+        advantage, returns_batched = self.calc_advantage()
 
-            states = torch.Tensor(self.states_batched).float()
-            actions = torch.Tensor(self.actions_batched).float()
+        states = torch.Tensor(self.states_batched).float()
+        actions = torch.Tensor(self.actions_batched).float()
+
+        for _ in range(self.config['learning_iterations_per_round']):
 
             _, action_log_probs, entropy, value = self.policy.act(
                 states, actions)
@@ -41,17 +42,16 @@ class PPOTrainer(BaseActorCritic):
 
             self.take_optim_step(value_loss, action_loss, entropy)
 
-    def calc_returns(self):
-        returns_batched = []
-        for episode_rewards in self.rewards_batched:
-            returns = []
+    def calc_discounted_rewards(self):
+        discounted_rewards = []
+        for rewards_episode in self.rewards_batched:
+            rewards = []
             cumulative = 0
-            for reward in episode_rewards[::-1]:
+            for reward in rewards_episode[::-1]:
                 cumulative = reward + self.config['discount_rate'] * cumulative
-                returns.append(cumulative)
-            returns.reverse()
-            returns_batched.append(returns)
-        return returns_batched
+                rewards.insert(0, cumulative)
+            discounted_rewards.append(rewards)
+        return discounted_rewards
 
     def calc_gae(self):
         returns_batched = []
@@ -68,11 +68,10 @@ class PPOTrainer(BaseActorCritic):
         return returns_batched
 
     def calc_advantage(self):
-        returns_batched = []
         if self.config['use_gae']:
             returns_batched = self.calc_gae()
         else:
-            returns_batched = self.calc_returns()
+            returns_batched = self.calc_discounted_rewards()
         advantage = torch.Tensor(returns_batched) - torch.Tensor(self.values_batched)
         advantage = (advantage - advantage.mean(dim=1, keepdim=True)) / \
             (advantage.std(dim=1, keepdim=True) + 1e-5)
@@ -82,7 +81,7 @@ class PPOTrainer(BaseActorCritic):
         self.policy_optim.zero_grad()
         loss = (self.config['value_coef'] * value_loss) + action_loss - \
             (dist_entropy * self.config['entropy_coef'])
-        print(loss)
+        print(f"loss: {loss.item()}")
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
                                        self.config['gradient_clipping_norm'])
